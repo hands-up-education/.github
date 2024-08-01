@@ -1,7 +1,3 @@
-# Hands Up Education
+# .github
 
-We are Hands Up Education, a not-for-profit organisation and international community of practice, creating and sharing high quality teaching resources. Our creative, passionate and dedicated team are leading change and growth in the teaching of Latin and Classics.
-
-Our mission is to increase the teaching of Latin and Classics through creating innovative, up-to-date and highly accessible resources fit for a modern curriculum. As a team, we are good friends and thoroughly enjoy working together, drawing on our combined experience as teachers, leaders of national Classics and Latin development programmes, researchers and authors. We also have our very own in-house illustrator and software developer who also happen to be classicists, making us well placed to develop both print and digital teaching and learning resources of the highest standard.
-
-As a community interest company we benefit from being able to move swiftly, with few overheads to make great things happen. For example between 2017 and 2020, we were able to plan, create, trial and launch Suburani, a new Latin Course, offering a much more diverse and relevant study of Latin than ever before which is rapidly being adopted in schools across the UK and US. Our flexible, collaborative model and genuine passion for this work means we can ensure this course will be continually improved and developed. We also reinvest our profits for the development of further resources for Latin and Classics like our free-to-access Primary Latin Course.
+Hands Up Education Github public profile.
