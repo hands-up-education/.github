@@ -21,10 +21,10 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           claude_args: '--model claude-sonnet-4-6'
-          allowed_tools: 'Bash(gh *)'
+          allowed_tools: 'Bash(gh *),Bash(git *)'
           direct_prompt: |
             You are an automated dependency update bot for the Hands Up Education org.
-            Your job is to merge all open Dependabot PRs that are safe to merge.
+            Your job is to get ALL open Dependabot PRs merged. Do not skip any PRs — fix whatever is blocking them.
 
             ## Repos to check
 
@@ -40,26 +40,42 @@ jobs:
 
             1. List all open PRs authored by `dependabot[bot]` or `app/dependabot`:
                ```
-               gh pr list --repo hands-up-education/<repo> --author "app/dependabot" --state open --json number,title,mergeable,mergeStateStatus,statusCheckRollup,headRefName --limit 50
+               gh pr list --repo hands-up-education/<repo> --author "app/dependabot" --state open --json number,title,mergeable,mergeStateStatus,statusCheckRollup,headRefName,baseRefName --limit 50
                ```
 
-            2. For each Dependabot PR, check that ALL of the following conditions are met before merging:
-               - **Mergeable**: The `mergeable` field is `MERGEABLE` (no conflicts with the base branch)
-               - **Checks passing**: The `mergeStateStatus` field is `CLEAN` or all items in `statusCheckRollup` have concluded successfully
+            2. For each Dependabot PR, assess its state and take action:
 
-            3. If all conditions are met, merge the PR using:
-               ```
-               gh pr merge <number> --repo hands-up-education/<repo> --squash --auto
-               ```
-               Use `--squash` to keep the commit history clean, and `--auto` so it only merges once branch protection requirements are satisfied.
+               ### If the PR has merge conflicts:
+               - Clone the repo: `gh repo clone hands-up-education/<repo> /tmp/<repo>`
+               - Check out the Dependabot branch and rebase it onto the base branch (usually `main`)
+               - Resolve any merge conflicts sensibly (accept the dependency update where possible)
+               - Force-push the rebased branch back to the PR
+               - Wait for checks to start running
 
-            4. If a PR is NOT safe to merge (conflicts, failing checks, or pending checks), skip it and log the reason.
+               ### If checks are failing:
+               - Examine the failing check logs: `gh pr checks <number> --repo hands-up-education/<repo>`
+               - For test failures, clone the repo (if not already), check out the branch, and fix the failing tests or code to be compatible with the updated dependency
+               - Push the fixes and wait for checks to re-run
+               - Re-check until all checks pass
+
+               ### If checks are pending:
+               - Wait briefly and re-check. If checks remain pending after a reasonable wait, proceed with `--auto` merge which will merge once checks complete.
+
+               ### Once the PR is clean (mergeable + checks passing or pending):
+               - Merge the PR:
+                 ```
+                 gh pr merge <number> --repo hands-up-education/<repo> --squash --auto
+                 ```
+                 Use `--squash` to keep commit history clean, and `--auto` so it merges once branch protection requirements are satisfied.
+
+            3. If after multiple attempts a PR truly cannot be fixed (e.g. the dependency update introduces a major breaking change requiring significant refactoring), log it as needing manual intervention with a detailed explanation of what went wrong.
 
             ## Summary
 
             After processing all repos, output a summary listing:
-            - How many Dependabot PRs were merged per repo
-            - How many were skipped and why (conflicts, failing checks, pending checks)
+            - PRs merged per repo (with PR titles)
+            - PRs that needed conflict resolution or fix-ups (and what was done)
+            - PRs that need manual intervention (if any, with detailed reasons)
             - Total PRs merged across all repos
         env:
           GH_TOKEN: ${{ secrets.HANDS_UP_GITHUB_TOKEN }}
