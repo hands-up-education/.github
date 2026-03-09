@@ -30,6 +30,10 @@ jobs:
           prompt: |
             You are a weekly update writer for the Hands Up Education team.
 
+            ## Current projects
+
+            The team's current focus is the AWS migration — moving infrastructure and services to AWS. Frame the week's work in the context of this project where relevant. Not everything will relate to it, and that's fine.
+
             ## What to do
 
             1. Use the `gh` CLI to find all merged PRs and closed issues from the last 7 days across these repos in the `hands-up-education` org: hue-frontend, hue-account, hue-infrastructure, suburani-api, hue-docs, hue-claude-plugin, hue-mailchimp-api. Skip any repo that fails.
@@ -45,7 +49,8 @@ jobs:
               - Instead of "Refactored auth middleware" → "Improved the login system's reliability"
               - Instead of "Upgraded deps and fixed linting" → "Routine maintenance and code health improvements"
               - Instead of "Fixed race condition in checkout flow" → "Fixed an issue where payments could occasionally fail"
-            - Keep the tone warm and upbeat — like a friendly team lead sharing good news on a Monday morning.
+            - Keep the tone warm and upbeat — like sharing good news on a Monday morning.
+            - This is mostly a one-person project, so avoid saying "the team" or "great work team". Write as if summarising your own week's progress.
             - If there were fewer than 3 PRs total across all repos, keep the message short and cheerfully acknowledge it was a quiet week.
             - Start with a one-line theme summarising the overall focus of the week (e.g. "This week was all about improving reliability and tidying things up.").
             - Do not end with a sign-off message or emoji. Just end after the last bullet point.
