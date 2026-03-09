@@ -1,0 +1,90 @@
+name: Weekly Slack Update
+
+on:
+  schedule:
+    - cron: '0 9 * * 1'  # Every Monday at 9am UTC
+  workflow_dispatch: {}    # Manual trigger for testing
+
+jobs:
+  weekly-update:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+      id-token: write    # Required by claude-code-action for OIDC auth
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Generate weekly summary with Claude Code
+        id: claude
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.HANDS_UP_GITHUB_TOKEN }}
+          claude_args: >-
+            --model claude-sonnet-4-6
+            --max-turns 15
+            --allowedTools "Bash(gh *),Bash(date *),Bash(cat *),Write"
+          prompt: |
+            You are a weekly update writer for the Hands Up Education team.
+
+            ## What to do
+
+            1. Use the `gh` CLI to find all merged PRs and closed issues from the last 7 days across these repos in the `hands-up-education` org: hue-frontend, hue-account, hue-infrastructure, suburani-api, hue-docs, hue-claude-plugin, hue-mailchimp-api. Skip any repo that fails.
+
+            2. Write a Slack summary (in mrkdwn format) and save it to `/tmp/slack-message.txt`. The file should contain only the message — no preamble, no code fences.
+
+            ## Writing guidelines
+
+            - Start with: ":wave: *Weekly Update — week ending <today's date>*"
+            - Group work by theme or area (e.g. "What's new for users", "Behind the scenes", "Docs & guides") rather than listing repo-by-repo. Use friendly, plain-English category names.
+            - For each area, write 2-4 bullet points summarising what was accomplished. Reference PR numbers as clickable links: <https://github.com/hands-up-education/repo/pull/123|#123>.
+            - Write for a non-technical audience. Avoid jargon like "refactor", "CI/CD", "linting", "deps", "middleware", "migration", "hotfix", "merge conflict". Instead describe what the change means for users or the team. For example:
+              - Instead of "Refactored auth middleware" → "Improved the login system's reliability"
+              - Instead of "Upgraded deps and fixed linting" → "Routine maintenance and code health improvements"
+              - Instead of "Fixed race condition in checkout flow" → "Fixed an issue where payments could occasionally fail"
+            - Keep the tone warm and upbeat — like a friendly team lead sharing good news on a Monday morning.
+            - If there were fewer than 3 PRs total across all repos, keep the message short and cheerfully acknowledge it was a quiet week.
+            - Start with a one-line theme summarising the overall focus of the week (e.g. "This week was all about improving reliability and tidying things up.").
+            - Do not end with a sign-off message or emoji. Just end after the last bullet point.
+            - Total message length: aim for 30-60 seconds reading time (roughly 150-300 words).
+
+
+      - name: Post to Slack
+        if: success()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          if [ ! -f /tmp/slack-message.txt ]; then
+            echo "::error::Claude did not produce /tmp/slack-message.txt"
+            exit 1
+          fi
+
+          MESSAGE=$(cat /tmp/slack-message.txt)
+
+          if [ -z "$MESSAGE" ]; then
+            echo "::error::Slack message file is empty"
+            exit 1
+          fi
+
+          RESPONSE=$(curl -s -X POST "$SLACK_WEBHOOK_URL" \
+            -H 'Content-Type: application/json' \
+            -d "$(jq -n --arg text "$MESSAGE" '{"text": $text, "unfurl_links": false, "unfurl_media": false}')")
+
+          if [ "$RESPONSE" = "ok" ]; then
+            echo "Successfully posted to Slack"
+          else
+            echo "::error::Slack webhook returned: $RESPONSE"
+            exit 1
+          fi
+
+      - name: Notify on failure
+        if: failure()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          curl -s -X POST "$SLACK_WEBHOOK_URL" \
+            -H 'Content-Type: application/json' \
+            -d '{"text": ":warning: Weekly engineering update failed to generate. Check the <https://github.com/hands-up-education/.github/actions|Actions log> for details."}'
