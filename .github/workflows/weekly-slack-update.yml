@@ -33,7 +33,7 @@ jobs:
 
             ## What to do
 
-            1. Use the `gh` CLI to find all merged PRs and closed issues from the last 7 days across these repos in the `hands-up-education` org: hue-frontend, hue-account, hue-infrastructure, suburani-api, hue-docs, hue-claude-plugin, hue-mailchimp-api, hue-e2e-tests. Skip any repo that fails.
+            1. Use the `gh` CLI to find all merged PRs and closed issues from the last 7 days across these repos in the `hands-up-education` org: hue-frontend, hue-account, hue-infrastructure, suburani-api, hue-docs, hue-claude-plugin, hue-mailchimp-api. Skip any repo that fails.
 
             2. Write a Slack summary (in mrkdwn format) and save it to `/tmp/slack-message.txt`. The file should contain only the message — no preamble, no code fences.
 
