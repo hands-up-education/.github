@@ -1,0 +1,65 @@
+name: Merge Dependabot PRs
+
+on:
+  schedule:
+    - cron: '0 11 * * 1' # Every Monday at 11am UTC
+  workflow_dispatch: {} # Manual trigger for testing
+
+jobs:
+  merge-dependabot-prs:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Merge Dependabot PRs via Claude Code
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: '--model claude-sonnet-4-6'
+          allowed_tools: 'Bash(gh *)'
+          direct_prompt: |
+            You are an automated dependency update bot for the Hands Up Education org.
+            Your job is to merge all open Dependabot PRs that are safe to merge.
+
+            ## Repos to check
+
+            Iterate through each of these repos in the `hands-up-education` org:
+            - hue-frontend
+            - hue-account
+            - hue-infrastructure
+            - suburani-api
+            - hue-docs
+            - hue-claude-plugin
+
+            ## For each repo
+
+            1. List all open PRs authored by `dependabot[bot]` or `app/dependabot`:
+               ```
+               gh pr list --repo hands-up-education/<repo> --author "app/dependabot" --state open --json number,title,mergeable,mergeStateStatus,statusCheckRollup,headRefName --limit 50
+               ```
+
+            2. For each Dependabot PR, check that ALL of the following conditions are met before merging:
+               - **Mergeable**: The `mergeable` field is `MERGEABLE` (no conflicts with the base branch)
+               - **Checks passing**: The `mergeStateStatus` field is `CLEAN` or all items in `statusCheckRollup` have concluded successfully
+
+            3. If all conditions are met, merge the PR using:
+               ```
+               gh pr merge <number> --repo hands-up-education/<repo> --squash --auto
+               ```
+               Use `--squash` to keep the commit history clean, and `--auto` so it only merges once branch protection requirements are satisfied.
+
+            4. If a PR is NOT safe to merge (conflicts, failing checks, or pending checks), skip it and log the reason.
+
+            ## Summary
+
+            After processing all repos, output a summary listing:
+            - How many Dependabot PRs were merged per repo
+            - How many were skipped and why (conflicts, failing checks, pending checks)
+            - Total PRs merged across all repos
+        env:
+          GH_TOKEN: ${{ secrets.HANDS_UP_GITHUB_TOKEN }}
