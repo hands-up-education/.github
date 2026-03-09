@@ -26,7 +26,7 @@ jobs:
           claude_args: >-
             --model claude-sonnet-4-6
             --max-turns 15
-            --allowedTools "Bash(gh *),Bash(date *),Bash(cat *),Write"
+            --allowedTools "Bash,Read,Write,Glob,Grep"
           prompt: |
             You are a weekly update writer for the Hands Up Education team.
 
