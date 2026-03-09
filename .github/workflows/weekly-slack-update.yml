@@ -61,7 +61,7 @@ jobs:
         if: success()
         env:
           SLACK_USER_TOKEN: ${{ secrets.SLACK_USER_TOKEN }}
-          SLACK_CHANNEL: alex-test-channel
+          SLACK_CHANNEL: tech-team
         run: |
           if [ ! -f /tmp/slack-message.txt ]; then
             echo "::error::Claude did not produce /tmp/slack-message.txt"
@@ -93,7 +93,7 @@ jobs:
         if: failure()
         env:
           SLACK_USER_TOKEN: ${{ secrets.SLACK_USER_TOKEN }}
-          SLACK_CHANNEL: alex-test-channel
+          SLACK_CHANNEL: tech-team
         run: |
           curl -s -X POST "https://slack.com/api/chat.postMessage" \
             -H "Authorization: Bearer $SLACK_USER_TOKEN" \
