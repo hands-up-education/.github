@@ -22,6 +22,46 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.HANDS_UP_GITHUB_TOKEN }}
         run: |
+          fetch_search_results() {
+            local repo="$1"
+            local search_query="$2"
+            local jq_filter="$3"
+            local label="$4"
+            local page=1
+            local total_pages=1
+            local results='[]'
+
+            while [ "$page" -le "$total_pages" ]; do
+              local response
+              response=$(gh api -X GET search/issues \
+                -f q="$search_query" \
+                -f per_page=100 \
+                -f page="$page" 2>/dev/null) || return 1
+
+              if [ "$page" -eq 1 ]; then
+                local total_count
+                total_count=$(echo "$response" | jq -r '.total_count')
+
+                if [ "$total_count" -gt 1000 ]; then
+                  echo "::error::$repo $label search returned $total_count results, exceeding the GitHub Search API cap of 1000 items"
+                  return 2
+                fi
+
+                total_pages=$(( (total_count + 99) / 100 ))
+                if [ "$total_pages" -eq 0 ]; then
+                  total_pages=1
+                fi
+              fi
+
+              local items
+              items=$(echo "$response" | jq "$jq_filter") || return 1
+              results=$(echo "$results" | jq --argjson items "$items" '. + $items') || return 1
+              page=$((page + 1))
+            done
+
+            printf '%s\n' "$results"
+          }
+
           END_DATE=$(date -u +%Y-%m-%dT00:00:00+00:00)
           START_DATE=$(date -u -d '7 days ago' +%Y-%m-%dT00:00:00+00:00)
           echo "Date range: $START_DATE to $END_DATE"
@@ -33,24 +73,44 @@ jobs:
           for REPO in $REPOS; do
             echo "--- Querying $REPO ---"
 
-            PRS=$(gh pr list --repo "hands-up-education/$REPO" \
-              --state merged \
-              --search "merged:${START_DATE}..${END_DATE}" \
-              --json title,number,author,url,mergedAt \
-              --limit 100 2>/dev/null) || { FAILED_REPOS="$FAILED_REPOS $REPO"; echo "Failed to query PRs for $REPO"; continue; }
+            PRS=$(fetch_search_results \
+              "$REPO" \
+              "repo:hands-up-education/$REPO is:pr is:merged merged:${START_DATE}..${END_DATE}" \
+              '.items | map({
+                title,
+                number,
+                author: (.user.login // "ghost"),
+                url: .html_url,
+                mergedAt: .closed_at
+              })' \
+              "merged PR") || {
+                STATUS=$?
+                if [ "$STATUS" -eq 2 ]; then
+                  exit 1
+                fi
+                FAILED_REPOS="$FAILED_REPOS $REPO"
+                echo "Failed to query PRs for $REPO"
+                continue
+              }
 
-            ISSUES=$(gh issue list --repo "hands-up-education/$REPO" \
-              --state closed \
-              --search "closed:${START_DATE}..${END_DATE}" \
-              --json title,number,url,author \
-              --limit 100 2>/dev/null) || { FAILED_REPOS="$FAILED_REPOS $REPO"; echo "Failed to query issues for $REPO"; continue; }
-
-            # Warn if a query hit the limit
-            PR_COUNT=$(echo "$PRS" | jq length)
-            ISSUE_COUNT=$(echo "$ISSUES" | jq length)
-            if [ "$PR_COUNT" -eq 100 ] || [ "$ISSUE_COUNT" -eq 100 ]; then
-              echo "::warning::$REPO returned 100 results — some activity may be truncated"
-            fi
+            ISSUES=$(fetch_search_results \
+              "$REPO" \
+              "repo:hands-up-education/$REPO is:issue is:closed closed:${START_DATE}..${END_DATE}" \
+              '.items | map({
+                title,
+                number,
+                url: .html_url,
+                author: (.user.login // "ghost")
+              })' \
+              "closed issue") || {
+                STATUS=$?
+                if [ "$STATUS" -eq 2 ]; then
+                  exit 1
+                fi
+                FAILED_REPOS="$FAILED_REPOS $REPO"
+                echo "Failed to query issues for $REPO"
+                continue
+              }
 
             RESULTS=$(echo "$RESULTS" | jq --arg repo "$REPO" --argjson prs "$PRS" --argjson issues "$ISSUES" \
               '. + [{"repo": $repo, "merged_prs": $prs, "closed_issues": $issues}]')
@@ -79,9 +139,10 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          claude_args: '--model claude-sonnet-4-6'
-          max_turns: 5
-          allowed_tools: 'Bash(cat *),Bash(date *),Write'
+          claude_args: >-
+            --model claude-sonnet-4-6
+            --max-turns 5
+            --allowedTools "Bash(cat *),Bash(date *),Write"
           prompt: |
             You are a weekly update writer for the Hands Up Education team.
             Your job is to read the engineering activity data and write a friendly Slack summary.
