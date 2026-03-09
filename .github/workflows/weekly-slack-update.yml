@@ -1,0 +1,155 @@
+name: Weekly Slack Update
+
+on:
+  schedule:
+    - cron: '0 9 * * 1'  # Every Monday at 9am UTC
+  workflow_dispatch: {}    # Manual trigger for testing
+
+jobs:
+  weekly-update:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+      id-token: write    # Required by claude-code-action for OIDC auth
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Gather GitHub activity
+        id: gather
+        env:
+          GH_TOKEN: ${{ secrets.HANDS_UP_GITHUB_TOKEN }}
+        run: |
+          END_DATE=$(date -u +%Y-%m-%dT00:00:00+00:00)
+          START_DATE=$(date -u -d '7 days ago' +%Y-%m-%dT00:00:00+00:00)
+          echo "Date range: $START_DATE to $END_DATE"
+
+          REPOS="hue-frontend hue-account hue-infrastructure suburani-api hue-docs hue-claude-plugin hue-mailchimp-api hue-e2e-tests"
+          FAILED_REPOS=""
+          RESULTS="[]"
+
+          for REPO in $REPOS; do
+            echo "--- Querying $REPO ---"
+
+            PRS=$(gh pr list --repo "hands-up-education/$REPO" \
+              --state merged \
+              --search "merged:${START_DATE}..${END_DATE}" \
+              --json title,number,author,url,mergedAt \
+              --limit 100 2>/dev/null) || { FAILED_REPOS="$FAILED_REPOS $REPO"; echo "Failed to query PRs for $REPO"; continue; }
+
+            ISSUES=$(gh issue list --repo "hands-up-education/$REPO" \
+              --state closed \
+              --search "closed:${START_DATE}..${END_DATE}" \
+              --json title,number,url,author \
+              --limit 100 2>/dev/null) || { FAILED_REPOS="$FAILED_REPOS $REPO"; echo "Failed to query issues for $REPO"; continue; }
+
+            # Warn if a query hit the limit
+            PR_COUNT=$(echo "$PRS" | jq length)
+            ISSUE_COUNT=$(echo "$ISSUES" | jq length)
+            if [ "$PR_COUNT" -eq 100 ] || [ "$ISSUE_COUNT" -eq 100 ]; then
+              echo "::warning::$REPO returned 100 results — some activity may be truncated"
+            fi
+
+            RESULTS=$(echo "$RESULTS" | jq --arg repo "$REPO" --argjson prs "$PRS" --argjson issues "$ISSUES" \
+              '. + [{"repo": $repo, "merged_prs": $prs, "closed_issues": $issues}]')
+          done
+
+          # Fail if more than half the repos failed
+          FAIL_COUNT=$(echo "$FAILED_REPOS" | wc -w | tr -d ' ')
+          if [ "$FAIL_COUNT" -gt 4 ]; then
+            echo "::error::$FAIL_COUNT repos failed to query: $FAILED_REPOS"
+            exit 1
+          fi
+
+          # Write results to file for Claude to read
+          echo "$RESULTS" | jq '.' > /tmp/weekly-activity.json
+          echo "start_date=$START_DATE" >> "$GITHUB_OUTPUT"
+          echo "end_date=$END_DATE" >> "$GITHUB_OUTPUT"
+
+          if [ -n "$FAILED_REPOS" ]; then
+            echo "failed_repos=$FAILED_REPOS" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "Gathered data from $(echo "$RESULTS" | jq length) repos"
+
+      - name: Generate summary with Claude Code
+        id: claude
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: '--model claude-sonnet-4-6'
+          max_turns: 5
+          allowed_tools: 'Bash(cat *),Bash(date *),Write'
+          prompt: |
+            You are a weekly update writer for the Hands Up Education team.
+            Your job is to read the engineering activity data and write a friendly Slack summary.
+
+            ## Step 1: Read the data
+
+            Read the JSON file at `/tmp/weekly-activity.json`. It contains an array of objects, each with:
+            - `repo`: the repository name
+            - `merged_prs`: array of PRs merged this week (title, number, author, url)
+            - `closed_issues`: array of issues closed this week (title, number, url, author)
+
+            The reporting period is ${{ steps.gather.outputs.start_date }} to ${{ steps.gather.outputs.end_date }}.
+            ${{ steps.gather.outputs.failed_repos && format('Note: these repos could not be queried and are missing from the data: {0}', steps.gather.outputs.failed_repos) }}
+
+            ## Step 2: Write the Slack message
+
+            Compose a message in Slack mrkdwn format following these rules:
+
+            - Start with: ":wave: *Weekly Update — week ending ${{ steps.gather.outputs.end_date }}*"
+            - Group work by theme or area (e.g. "What's new for users", "Behind the scenes", "Docs & guides") rather than listing repo-by-repo. Use friendly, plain-English category names.
+            - For each area, write 2-4 bullet points summarising what was accomplished. Reference PR numbers as clickable links: <https://github.com/hands-up-education/repo/pull/123|#123>.
+            - Write for a non-technical audience. Avoid jargon like "refactor", "CI/CD", "linting", "deps", "middleware", "migration", "hotfix", "merge conflict". Instead describe what the change means for users or the team. For example:
+              - Instead of "Refactored auth middleware" → "Improved the login system's reliability"
+              - Instead of "Upgraded deps and fixed linting" → "Routine maintenance and code health improvements"
+              - Instead of "Fixed race condition in checkout flow" → "Fixed an issue where payments could occasionally fail"
+            - Keep the tone warm and upbeat — like a friendly team lead sharing good news on a Monday morning.
+            - If there were fewer than 3 PRs total across all repos, keep the message short and cheerfully acknowledge it was a quiet week.
+            - If some repos failed to be queried, do NOT mention this in the message — just summarise what you have.
+            - End with a brief highlight, a thank-you, or a friendly sign-off. Keep it to one line.
+            - Total message length: aim for 30-60 seconds reading time (roughly 150-300 words).
+
+            ## Step 3: Save the message
+
+            Write ONLY the final Slack mrkdwn message (no preamble, no explanation, no code fences) to the file `/tmp/slack-message.txt`. This file will be read by a subsequent step and posted to Slack.
+
+      - name: Post to Slack
+        if: success()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          if [ ! -f /tmp/slack-message.txt ]; then
+            echo "::error::Claude did not produce /tmp/slack-message.txt"
+            exit 1
+          fi
+
+          MESSAGE=$(cat /tmp/slack-message.txt)
+
+          if [ -z "$MESSAGE" ]; then
+            echo "::error::Slack message file is empty"
+            exit 1
+          fi
+
+          RESPONSE=$(curl -s -X POST "$SLACK_WEBHOOK_URL" \
+            -H 'Content-Type: application/json' \
+            -d "$(jq -n --arg text "$MESSAGE" '{"text": $text, "unfurl_links": false, "unfurl_media": false}')")
+
+          if [ "$RESPONSE" = "ok" ]; then
+            echo "Successfully posted to Slack"
+          else
+            echo "::error::Slack webhook returned: $RESPONSE"
+            exit 1
+          fi
+
+      - name: Notify on failure
+        if: failure()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          curl -s -X POST "$SLACK_WEBHOOK_URL" \
+            -H 'Content-Type: application/json' \
+            -d '{"text": ":warning: Weekly engineering update failed to generate. Check the <https://github.com/hands-up-education/.github/actions|Actions log> for details."}'
