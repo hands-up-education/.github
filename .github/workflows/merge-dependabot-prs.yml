@@ -21,10 +21,36 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           claude_args: '--model claude-sonnet-4-6'
-          allowed_tools: 'Bash(gh *),Bash(git *)'
+          allowed_tools: 'Bash(gh *),Bash(git *),Bash(tee *),Bash(cat *),Bash(mkdir *)'
           direct_prompt: |
             You are an automated dependency update bot for the Hands Up Education org.
             Your job is to get ALL open Dependabot PRs merged. Do not skip any PRs — fix whatever is blocking them.
+
+            IMPORTANT: Write a detailed Markdown report to `/tmp/dependabot-report.md` as you go.
+            Use `tee -a /tmp/dependabot-report.md` or write to it directly. The report should follow this structure:
+
+            ```markdown
+            # Dependabot PR Merge Report — <today's date>
+
+            ## Summary
+            - **Total PRs found**: X
+            - **Merged**: X
+            - **Needed fixes**: X
+            - **Needs manual intervention**: X
+
+            ## Per-repo details
+
+            ### <repo-name>
+            | PR | Title | Status | Notes |
+            |----|-------|--------|-------|
+            | #N | ...   | ✅ Merged / ⚠️ Needs intervention | ... |
+
+            ## Actions taken
+            - <describe any conflict resolutions, test fixes, etc.>
+
+            ## Manual intervention required
+            - <if any, with detailed reasons>
+            ```
 
             ## Repos to check
 
@@ -79,3 +105,11 @@ jobs:
             - Total PRs merged across all repos
         env:
           GH_TOKEN: ${{ secrets.HANDS_UP_GITHUB_TOKEN }}
+
+      - name: Upload merge report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependabot-merge-report
+          path: /tmp/dependabot-report.md
+          retention-days: 30
