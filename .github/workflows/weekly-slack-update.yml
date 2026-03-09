@@ -60,7 +60,8 @@ jobs:
       - name: Post to Slack
         if: success()
         env:
-          SLACK_WEBHOOK_URL: ${{ vars.SLACK_WEBHOOK_URL }}
+          SLACK_USER_TOKEN: ${{ secrets.SLACK_USER_TOKEN }}
+          SLACK_CHANNEL: alex-test-channel
         run: |
           if [ ! -f /tmp/slack-message.txt ]; then
             echo "::error::Claude did not produce /tmp/slack-message.txt"
@@ -74,22 +75,28 @@ jobs:
             exit 1
           fi
 
-          RESPONSE=$(curl -s -X POST "$SLACK_WEBHOOK_URL" \
-            -H 'Content-Type: application/json' \
-            -d "$(jq -n --arg text "$MESSAGE" '{"text": $text, "unfurl_links": false, "unfurl_media": false}')")
+          RESPONSE=$(curl -s -X POST "https://slack.com/api/chat.postMessage" \
+            -H "Authorization: Bearer $SLACK_USER_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n --arg text "$MESSAGE" --arg channel "$SLACK_CHANNEL" \
+              '{channel: $channel, text: $text, unfurl_links: false, unfurl_media: false}')")
 
-          if [ "$RESPONSE" = "ok" ]; then
+          OK=$(echo "$RESPONSE" | jq -r '.ok')
+          if [ "$OK" = "true" ]; then
             echo "Successfully posted to Slack"
           else
-            echo "::error::Slack webhook returned: $RESPONSE"
+            echo "::error::Slack API returned: $RESPONSE"
             exit 1
           fi
 
       - name: Notify on failure
         if: failure()
         env:
-          SLACK_WEBHOOK_URL: ${{ vars.SLACK_WEBHOOK_URL }}
+          SLACK_USER_TOKEN: ${{ secrets.SLACK_USER_TOKEN }}
+          SLACK_CHANNEL: alex-test-channel
         run: |
-          curl -s -X POST "$SLACK_WEBHOOK_URL" \
-            -H 'Content-Type: application/json' \
-            -d '{"text": ":warning: Weekly engineering update failed to generate. Check the <https://github.com/hands-up-education/.github/actions|Actions log> for details."}'
+          curl -s -X POST "https://slack.com/api/chat.postMessage" \
+            -H "Authorization: Bearer $SLACK_USER_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n --arg channel "$SLACK_CHANNEL" \
+              '{channel: $channel, text: ":warning: Weekly engineering update failed to generate. Check the <https://github.com/hands-up-education/.github/actions|Actions log> for details.", unfurl_links: false}')"
