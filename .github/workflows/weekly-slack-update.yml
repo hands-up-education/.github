@@ -42,7 +42,7 @@ jobs:
 
             ## Writing guidelines
 
-            - Start with: ":wave: *Weekly Update — week ending <today's date>*"
+            - Start with: ":wave: *Weekly Update — week ending <yesterday's date>*" (the workflow runs on Monday, so "week ending" should reference the Sunday before).
             - Group work by theme or area (e.g. "What's new for users", "Behind the scenes", "Docs & guides") rather than listing repo-by-repo. Use friendly, plain-English category names.
             - For each area, write 2-4 bullet points summarising what was accomplished. Reference PR numbers as clickable links: <https://github.com/hands-up-education/repo/pull/123|#123>.
             - Write for a non-technical audience. Avoid jargon like "refactor", "CI/CD", "linting", "deps", "middleware", "migration", "hotfix", "merge conflict". Instead describe what the change means for users or the team. For example:
