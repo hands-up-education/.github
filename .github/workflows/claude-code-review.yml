@@ -25,6 +25,26 @@ jobs:
       issues: read
       id-token: write
     steps:
+      - name: React with eyes emoji
+        uses: actions/github-script@v7
+        with:
+          script: |
+            if (context.eventName === 'issue_comment') {
+              await github.rest.reactions.createForIssueComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: context.payload.comment.id,
+                content: 'eyes'
+              });
+            } else if (context.eventName === 'pull_request' || context.eventName === 'pull_request_target') {
+              await github.rest.reactions.createForIssue({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.payload.pull_request.number,
+                content: 'eyes'
+              });
+            }
+
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
@@ -40,6 +60,6 @@ jobs:
           plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
           plugins: 'code-review@claude-code-plugins'
           prompt: |
-            /code-review:code-review --comment ${{ github.repository }}/pull/${{ github.event.pull_request.number || github.event.issue.number }}
+            /code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number || github.event.issue.number }}
 
             IMPORTANT: You MUST always post a PR comment with your review findings. If there are no issues, post a comment confirming the code looks good. Never finish without leaving a comment on the PR.
