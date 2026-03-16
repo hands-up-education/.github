@@ -25,6 +25,27 @@ jobs:
       issues: read
       id-token: write
     steps:
+      - name: React with eyes emoji
+        uses: actions/github-script@v7
+        with:
+          script: |
+            if (context.eventName === 'issue_comment') {
+              await github.rest.reactions.createForIssueComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: context.payload.comment.id,
+                content: 'eyes'
+              });
+            } else if (context.eventName === 'pull_request' || context.eventName === 'pull_request_target') {
+              // React to the PR body itself
+              await github.rest.reactions.createForIssue({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.payload.pull_request.number,
+                content: 'eyes'
+              });
+            }
+
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
