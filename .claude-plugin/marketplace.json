@@ -11,8 +11,7 @@
         "source": "github",
         "repo": "hands-up-education/hue-claude-plugin"
       },
-      "description": "Shared skills, agents, commands, and hooks for Hands Up Education",
-      "version": "1.0.0"
+      "description": "Shared skills, agents, commands, and hooks for Hands Up Education"
     }
   ]
 }
