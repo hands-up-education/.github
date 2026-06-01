@@ -60,9 +60,7 @@ jobs:
 
           Iterate through each of these repos in the hands-up-education org:
           - hue-frontend
-          - hue-account
-          - hue-infrastructure
-          - suburani-api
+          - hue-backend
           - hue-docs
           - hue-claude-plugin
 
