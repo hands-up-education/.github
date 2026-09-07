@@ -9,7 +9,7 @@
       "name": "hue",
       "source": {
         "source": "github",
-        "repo": "hands-up-education/hue-claude-plugin"
+        "repo": "hands-up-education/hue-agent-plugin"
       },
       "description": "Shared skills, agents, commands, and hooks for Hands Up Education"
     }
