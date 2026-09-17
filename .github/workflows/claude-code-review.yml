@@ -59,6 +59,11 @@ jobs:
       # logic, and avoids the per-finding validation fan-out that pushed
       # large PRs past 15 minutes. --allowedTools must name the inline
       # comment tool or the action never starts that MCP server.
+      # --json-schema makes the final response a machine-readable count
+      # so the gate step below can fail the job without parsing prose.
+      # The count instruction lives in --append-system-prompt because
+      # anything after the PR number on the /code-review line is parsed
+      # as review target text.
       - name: Run Claude Code Review
         id: claude-review
         uses: anthropics/claude-code-action@v1
@@ -69,3 +74,21 @@ jobs:
           claude_args: |
             --model claude-sonnet-5
             --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(gh api:*)"
+            --json-schema '{"type":"object","properties":{"correctness":{"type":"integer","minimum":0},"cleanups":{"type":"integer","minimum":0}},"required":["correctness","cleanups"],"additionalProperties":false}'
+            --append-system-prompt "End the PR summary comment with the line: 'Fix the findings and comment /claude-review to request a re-review.' After posting, your final response must be only the JSON object with correctness = number of findings tagged correctness and cleanups = number of all other findings."
+
+      - name: Fail on correctness findings
+        env:
+          VERDICT: ${{ steps.claude-review.outputs.structured_output }}
+        run: |
+          correctness=$(jq -r '.correctness // empty' <<<"$VERDICT" 2>/dev/null || true)
+          if [ -z "$correctness" ]; then
+            echo "::error::Review produced no structured verdict; comment /claude-review on the PR to re-run."
+            exit 1
+          fi
+          cleanups=$(jq -r '.cleanups // 0' <<<"$VERDICT")
+          echo "correctness=$correctness cleanups=$cleanups"
+          if [ "$correctness" -gt 0 ]; then
+            echo "::error::Claude found $correctness correctness issue(s). Fix them and comment /claude-review on the PR to re-run this check."
+            exit 1
+          fi
