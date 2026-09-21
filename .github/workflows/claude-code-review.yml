@@ -20,6 +20,8 @@ jobs:
       )
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      PR: ${{ github.event.pull_request.number || github.event.issue.number }}
     concurrency:
       group: claude-review-${{ github.repository }}-${{ github.event.pull_request.number || github.event.issue.number }}
       cancel-in-progress: true
@@ -72,16 +74,15 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           classify_inline_comments: 'false'
-          prompt: "/code-review high --comment ${{ github.event.pull_request.number || github.event.issue.number }}"
+          prompt: "/code-review high --comment ${{ env.PR }}"
           claude_args: |
             --model claude-sonnet-5
             --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(gh api:*)"
-            --append-system-prompt "Start every inline PR comment body with the finding's category in square brackets, for example [correctness] or [simplification]. After the inline comments are posted, or when there are no findings, post exactly one PR comment with: gh pr comment ${{ github.event.pull_request.number || github.event.issue.number }} --body <text>. That comment must start with the heading '## Claude code review', list the number of findings per category, and end with the line 'Fix the findings and comment /claude-review to request a re-review.'"
+            --append-system-prompt "Start every inline PR comment body with the finding's category in square brackets, for example [correctness] or [simplification]. After the inline comments are posted, or when there are no findings, post exactly one PR comment with: gh pr comment ${{ env.PR }} --body <text>. That comment must start with the heading '## Claude code review', list the number of findings per category, and end with the line 'Fix the findings and comment /claude-review to request a re-review.'"
 
       - name: Fail on correctness findings
         env:
           GH_TOKEN: ${{ github.token }}
-          PR: ${{ github.event.pull_request.number || github.event.issue.number }}
         run: |
           summaries=$(gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$PR/comments" \
             --jq '[.[] | select(.user.login == "claude[bot]" and (.body | startswith("## Claude code review")))] | length')
