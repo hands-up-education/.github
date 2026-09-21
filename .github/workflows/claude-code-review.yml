@@ -20,6 +20,8 @@ jobs:
       )
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      PR: ${{ github.event.pull_request.number || github.event.issue.number }}
     concurrency:
       group: claude-review-${{ github.repository }}-${{ github.event.pull_request.number || github.event.issue.number }}
       cancel-in-progress: true
@@ -59,35 +61,39 @@ jobs:
       # logic, and avoids the per-finding validation fan-out that pushed
       # large PRs past 15 minutes. --allowedTools must name the inline
       # comment tool or the action never starts that MCP server.
-      # --json-schema makes the final response a machine-readable count
-      # so the gate step below can fail the job without parsing prose.
-      # The count instruction lives in --append-system-prompt because
-      # anything after the PR number on the /code-review line is parsed
-      # as review target text.
+      #
+      # The skill controls its own final turn, so --json-schema is never
+      # satisfied. Instead the system prompt makes each inline comment
+      # carry a [category] tag and adds one summary comment, and the gate
+      # step below counts those through the GitHub API. Inline comments
+      # are posted immediately rather than buffered through the action's
+      # Haiku classifier so the count is not subject to a second model.
       - name: Run Claude Code Review
         id: claude-review
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          use_sticky_comment: 'true'
-          prompt: "/code-review high --comment ${{ github.event.pull_request.number || github.event.issue.number }}"
+          classify_inline_comments: 'false'
+          prompt: "/code-review high --comment ${{ env.PR }}"
           claude_args: |
             --model claude-sonnet-5
             --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(gh api:*)"
-            --json-schema '{"type":"object","properties":{"correctness":{"type":"integer","minimum":0},"cleanups":{"type":"integer","minimum":0}},"required":["correctness","cleanups"],"additionalProperties":false}'
-            --append-system-prompt "End the PR summary comment with the line: 'Fix the findings and comment /claude-review to request a re-review.' After posting, your final response must be only the JSON object with correctness = number of findings tagged correctness and cleanups = number of all other findings."
+            --append-system-prompt "Start every inline PR comment body with the finding's category in square brackets, for example [correctness] or [simplification]. After the inline comments are posted, or when there are no findings, post exactly one PR comment with: gh pr comment ${{ env.PR }} --body <text>. That comment must start with the heading '## Claude code review', list the number of findings per category, and end with the line 'Fix the findings and comment /claude-review to request a re-review.'"
 
       - name: Fail on correctness findings
         env:
-          VERDICT: ${{ steps.claude-review.outputs.structured_output }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          correctness=$(jq -r '.correctness // empty' <<<"$VERDICT" 2>/dev/null || true)
-          if [ -z "$correctness" ]; then
-            echo "::error::Review produced no structured verdict; comment /claude-review on the PR to re-run."
+          summaries=$(gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$PR/comments" \
+            --jq '[.[] | select(.user.login == "claude[bot]" and (.body | startswith("## Claude code review")))] | length')
+          if [ "$summaries" -eq 0 ]; then
+            echo "::error::The review posted no summary comment, so it did not complete. Comment /claude-review on the PR to re-run."
             exit 1
           fi
-          cleanups=$(jq -r '.cleanups // 0' <<<"$VERDICT")
-          echo "correctness=$correctness cleanups=$cleanups"
+          head=$(gh pr view "$PR" --json headRefOid --jq .headRefOid)
+          correctness=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/comments" \
+            --jq "[.[] | select(.user.login == \"claude[bot]\" and .commit_id == \"$head\" and (.body | startswith(\"[correctness]\")))] | length")
+          echo "correctness findings on $head: $correctness"
           if [ "$correctness" -gt 0 ]; then
             echo "::error::Claude found $correctness correctness issue(s). Fix them and comment /claude-review on the PR to re-run this check."
             exit 1
