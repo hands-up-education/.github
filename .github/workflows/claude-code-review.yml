@@ -94,7 +94,7 @@ jobs:
       # commit is under review. issue_comment carries no ref/SHA for the PR
       # at all - the ambient checkout ref would be main - and even for
       # pull_request the default ref is a synthetic merge-preview commit.
-      - name: Resolve PR base and head SHAs
+      - name: Resolve PR head and merge-base SHAs
         id: pr-sha
         env:
           GH_TOKEN: ${{ github.token }}
@@ -111,8 +111,21 @@ jobs:
               exit 1
             fi
           done
+          # GitHub's own PR diff is base...head (merge-base to head), not a
+          # plain two-dot diff: if the base branch advanced after the PR
+          # forked, base..head would include the base's own later commits
+          # as if they were part of the PR. Ask GitHub for the merge-base
+          # directly - one metadata field, not the file list or diff body,
+          # so unlike generating the diff itself this call isn't subject to
+          # the compare API's 300-file cap - rather than fetching a guessed
+          # depth of history and hoping it's enough to compute it locally.
+          merge_base=$(gh api "repos/$GITHUB_REPOSITORY/compare/$base...$head" --jq '.merge_base_commit.sha')
+          if ! [[ "$merge_base" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Could not resolve a merge-base SHA for PR $PR (got: '$merge_base')"
+            exit 1
+          fi
           echo "head=$head" >> "$GITHUB_OUTPUT"
-          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "merge_base=$merge_base" >> "$GITHUB_OUTPUT"
 
       - name: Checkout PR head
         uses: actions/checkout@v6
@@ -126,36 +139,48 @@ jobs:
           # one unless the unrelated, and separately dangerous,
           # allowed_non_write_users input is set). That's why .git/** is
           # also denied to Read/Grep/Glob below - persist-credentials alone
-          # does not close this off. The next step's own fetch passes its
-          # own auth inline (URL-embedded) rather than relying on this.
+          # does not close this off.
           persist-credentials: false
 
-      # A trusted step fetches the base commit and generates the diff and
-      # changed-file list with git directly, pinned to the two SHAs
-      # captured above (not the live PR, which could have moved).
-      # GitHub's compare API caps the file list at 300 and can truncate the
-      # diff itself on a large PR, silently hiding files - git has no such
-      # cap. The fetch URL carries the token inline rather than persisting
-      # it to .git/config (nothing is written to disk - verified locally:
-      # `git fetch <url-with-token> <sha>` adds no remote and leaves
-      # .git/config unchanged). Output goes under a freshly created
-      # $RUNNER_TEMP directory, never a PR-controlled path: the checked-out
-      # tree can contain a symlink at a predictable name, and `>` follows
-      # symlinks, so a trusted write through a PR-chosen path could be
-      # redirected to overwrite any runner-writable file. mktemp's name
-      # isn't guessable in advance, so nothing in the PR can pre-place one.
+      # A trusted step fetches the merge-base commit and generates the diff
+      # and changed-file list with git directly, pinned to the SHAs
+      # captured above (not the live PR, which could have moved). GitHub's
+      # compare API caps the file list at 300 and can truncate the diff
+      # itself on a large PR, silently hiding files - git has no such cap.
+      #
+      # The fetch authenticates with a credential helper scoped to this one
+      # git invocation (-c, never written to .git/config) that reads the
+      # token from an env var already private to this step, rather than an
+      # embedded-token URL: git still writes FETCH_HEAD, a reflog entry and
+      # packed-refs for the fetched commit (object IDs and ref names, which
+      # git itself sanitizes of credentials in those files), so "nothing is
+      # written to disk" would be inaccurate - the credential specifically
+      # is what stays out of any file, including .git/config. GIT_TRACE and
+      # GIT_TRACE_CURL are explicitly unset because either would print the
+      # helper's password output verbatim if somehow already set in the
+      # environment.
+      #
+      # Output goes under a freshly created $RUNNER_TEMP directory, never a
+      # PR-controlled path: the checked-out tree can contain a symlink at a
+      # predictable name, and `>` follows symlinks, so a trusted write
+      # through a PR-chosen path could be redirected to overwrite any
+      # runner-writable file. mktemp's name isn't guessable in advance, so
+      # nothing in the PR can pre-place one.
       - name: Write PR diff and changed-file list
         id: pr-context
         env:
           GH_TOKEN: ${{ github.token }}
           HEAD: ${{ steps.pr-sha.outputs.head }}
-          BASE: ${{ steps.pr-sha.outputs.base }}
+          MERGE_BASE: ${{ steps.pr-sha.outputs.merge_base }}
         run: |
           set -euo pipefail
           dir=$(mktemp -d "$RUNNER_TEMP/claude-review-context.XXXXXX")
-          git fetch --depth 1 "https://x-access-token:${GH_TOKEN}@${GITHUB_SERVER_URL#https://}/${GITHUB_REPOSITORY}.git" "$BASE"
-          git diff "$BASE" "$HEAD" > "$dir/diff.patch"
-          git diff --name-only "$BASE" "$HEAD" > "$dir/changed-files.txt"
+          unset GIT_TRACE GIT_TRACE_CURL
+          # shellcheck disable=SC2016 # $GH_TOKEN expands inside git's own credential-helper subshell, not here
+          git -c credential.helper='!f() { echo username=x-access-token; echo "password=$GH_TOKEN"; }; f' \
+            fetch --depth 1 "https://${GITHUB_SERVER_URL#https://}/${GITHUB_REPOSITORY}.git" "$MERGE_BASE"
+          git diff "$MERGE_BASE" "$HEAD" > "$dir/diff.patch"
+          git diff --name-only "$MERGE_BASE" "$HEAD" > "$dir/changed-files.txt"
           echo "dir=$dir" >> "$GITHUB_OUTPUT"
 
       # Ground truth for "did this run actually post anything" below: any
@@ -175,19 +200,21 @@ jobs:
       # allowedTools is the actual security boundary, not the prompt text,
       # and the model gets no Bash at all: a Bash rule scoped to `gh pr
       # comment <PR>` still lets `gh` itself read an arbitrary file via
-      # `--body-file` (e.g. .git/config, where a token can end up) or
-      # target another PR/repo via `--repo`/`--edit-last` - none of that is
-      # stopped by restricting the PR number in the prefix, since gh, not
-      # Claude's Read tool, does the reading. So there is no comment-
-      # posting tool for the model at all; it can only post inline findings
-      # (mcp__github_inline_comment__create_inline_comment - fixed
+      # `--body-file` or target another PR/repo via `--repo`/`--edit-last` -
+      # none of that is stopped by restricting the PR number in the prefix,
+      # since gh, not Claude's Read tool, does the reading. So there is no
+      # comment-posting tool for the model at all; it can only post inline
+      # findings (mcp__github_inline_comment__create_inline_comment - fixed
       # server-side to this PR's repo and number, no path/repo/PR
       # parameters it could redirect) and its plain final response becomes
-      # the summary, posted and verified by a trusted step below.
-      # Read/Grep/Glob remain, scoped away from .git/** so a token can't be
-      # read back out (Claude Code applies Read deny rules to Grep/Glob
-      # too); granted bare (no path scope), Read also reaches $RUNNER_TEMP
-      # above despite that being outside the checked-out working directory.
+      # the summary, posted and independently verified by trusted steps
+      # below. Read/Grep/Glob remain, scoped away from .git/** so a token
+      # can't be read back out (Claude Code applies Read deny rules to
+      # Grep/Glob too); granted bare (no path scope), Read also reaches
+      # $RUNNER_TEMP above despite that being outside the checkout.
+      #
+      # The category list here must match verdict.jq's `categories` below -
+      # a tag outside this set fails the gate as malformed.
       - name: Run Claude Code Review
         id: claude-review
         uses: anthropics/claude-code-action@v1
@@ -197,13 +224,13 @@ jobs:
           prompt: |
             Review PR ${{ env.PR }} at high effort. Read ${{ steps.pr-context.outputs.dir }}/diff.patch for the full diff and ${{ steps.pr-context.outputs.dir }}/changed-files.txt for the list of changed files, then read whatever surrounding code and related files you need (Read, Grep, Glob) to catch correctness bugs, reuse/simplification opportunities, and efficiency issues. Investigate broadly - this is a high-effort pass, not a skim of the diff alone.
 
-            For every finding, post an inline PR review comment on the exact line with mcp__github_inline_comment__create_inline_comment. Start each comment body with the finding's category in square brackets, for example [correctness] or [simplification]. Always pass commit_id: "${{ steps.pr-sha.outputs.head }}" on every call - never omit it and never use a different value.
+            For every finding, post an inline PR review comment on the exact line with mcp__github_inline_comment__create_inline_comment. Start each comment body with exactly one of these tags in square brackets, and nothing before it: [correctness], [reuse], [simplification], [efficiency], [altitude], [conventions]. Always pass commit_id: "${{ steps.pr-sha.outputs.head }}" on every call - never omit it and never use a different value.
 
             You have no tool to post a summary comment yourself. Instead, your FINAL message in this conversation - nothing before or after it - must be exactly the summary text, in this exact order:
             1. The heading '## Claude code review'
-            2. A line with exactly this format, filled in truthfully: `<!-- findings: correctness=N total=M -->` where N is the number of [correctness] findings and M is the total number of findings you posted (both 0 if none)
-            3. The findings per category
-            4. The line 'Fix the findings and comment /claude-review to request a re-review.'
+            2. The findings, grouped by category
+            3. The line 'Fix the findings and comment /claude-review to request a re-review.'
+            4. As the absolute final line of the message, and the only line anywhere in the message matching this shape: `<!-- findings: correctness=N total=M -->`, where N is the number of [correctness] findings and M is the total number of findings you posted (both 0 if none)
           claude_args: |
             --model claude-sonnet-5
             --allowedTools "Read,Grep,Glob,mcp__github_inline_comment__create_inline_comment"
@@ -212,7 +239,10 @@ jobs:
       # Trusted-side posting: the model's final response text becomes the
       # comment body verbatim (plus the run marker), posted with the
       # workflow's own token via --body-file, never a value the model
-      # could turn into `--repo`/`--edit-last`/an arbitrary read.
+      # could turn into `--repo`/`--edit-last`/an arbitrary read. This is
+      # only a light sanity check before posting - the strict findings
+      # marker format is validated (and enforced) by the next step, so
+      # there's one place that parses it rather than two.
       - name: Post review summary
         id: post-summary
         env:
@@ -238,28 +268,25 @@ jobs:
             exit 1
           fi
 
-          marker=$(grep -oE '<!-- findings: correctness=[0-9]+ total=[0-9]+ -->' <<<"$summary" | head -1)
-          if [ -z "$marker" ]; then
-            echo "::error::Claude's summary is missing the required findings marker (expected a line like '<!-- findings: correctness=0 total=0 -->')."
-            exit 1
-          fi
-          echo "correctness_declared=$(grep -oE 'correctness=[0-9]+' <<<"$marker" | grep -oE '[0-9]+')" >> "$GITHUB_OUTPUT"
-          echo "total_declared=$(grep -oE 'total=[0-9]+' <<<"$marker" | grep -oE '[0-9]+')" >> "$GITHUB_OUTPUT"
-
           body_file=$(mktemp "$RUNNER_TEMP/claude-review-summary.XXXXXX")
           printf '%s\n\n%s\n' "$summary" "$RUN_MARKER" > "$body_file"
           gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body-file "$body_file"
 
-      # The summary marker above is the model's own claim; everything here
-      # is independently verified so a wrong or dishonest claim can't pass.
-      - name: Fail on correctness findings
+      # Every gate rule lives in this one jq program so there's a single
+      # place that parses the summary and the posted comments, instead of
+      # several ad hoc bash comparisons that can each get an edge case
+      # wrong (unbounded numbers, a marker that isn't really the summary's
+      # last line, a mistagged comment silently not counting toward any
+      # category). The bash around it only fetches inputs and checks the
+      # single `pass` field - see the workflow's PR description for the
+      # fixtures this program was tested against (clean pass, oversized
+      # numbers, duplicate markers, a mistagged comment, and more).
+      - name: Evaluate findings
         env:
           GH_TOKEN: ${{ github.token }}
           EXECUTION_FILE: ${{ steps.claude-review.outputs.execution_file }}
           HEAD_SHA: ${{ steps.pr-sha.outputs.head }}
           RUN_START: ${{ steps.run-start.outputs.time }}
-          CORRECTNESS_DECLARED: ${{ steps.post-summary.outputs.correctness_declared }}
-          TOTAL_DECLARED: ${{ steps.post-summary.outputs.total_declared }}
         run: |
           set -euo pipefail
           current_head=$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json headRefOid --jq .headRefOid)
@@ -268,18 +295,15 @@ jobs:
             exit 1
           fi
 
-          # A failed post attempt (e.g. GitHub 422s a stale line) still
-          # returns isError to the model without failing the session, so a
-          # finding can vanish without tripping num_turns or the summary
-          # check. tool_use ids of every inline-comment call, then any
-          # tool_result answering one of those ids with is_error true.
-          post_errors=$(jq '
-            ( [ .[] | select(.type=="assistant") | .message.content[]? |
-                select(.type=="tool_use" and .name=="mcp__github_inline_comment__create_inline_comment") | .id ] ) as $ids
-            | [ .[] | select(.type=="user") | .message.content[]? |
-                select(.type=="tool_result" and (.tool_use_id as $t | $ids | index($t) != null) and (.is_error // false)) ] | length
-          ' "$EXECUTION_FILE")
+          summary=$(jq -r '[.[] | select(.type=="result")] | last | .result // ""' "$EXECUTION_FILE")
 
+          # commit_id on a posted comment is whatever the model passed, not
+          # something GitHub enforces - a model (honest or manipulated)
+          # could target a different commit to dodge a commit_id filter. So
+          # "this run's comments" is author + created_at (both outside the
+          # model's control); a commit_id mismatch is its own gate failure
+          # inside verdict.jq, not a filter on which rows are counted.
+          #
           # --paginate applies --jq per page, so a review spanning multiple
           # comment pages would otherwise yield one value per page instead
           # of one total; --slurp wraps all pages into a single outer array
@@ -287,35 +311,96 @@ jobs:
           # to jq. set -euo pipefail makes a failed `gh api` (e.g. a later
           # page erroring after earlier pages succeeded) fail this whole
           # pipeline instead of jq quietly summarizing partial output.
-          #
-          # commit_id on a posted comment is whatever the model passed, not
-          # something GitHub enforces - a model (honest or manipulated)
-          # could target a different commit to dodge a commit_id filter. So
-          # "this run's comments" is author + created_at (both outside the
-          # model's control), and a commit_id mismatch is checked and
-          # failed separately, below, rather than used to select rows.
-          this_run=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/pulls/$PR/comments" | \
-            jq --arg start "$RUN_START" '[.[][] | select(.user.login == "claude[bot]" and .created_at >= $start)]')
-          actual_total=$(jq 'length' <<<"$this_run")
-          actual_correctness=$(jq '[.[] | select(.body | startswith("[correctness]"))] | length' <<<"$this_run")
-          wrong_commit=$(jq --arg sha "$HEAD_SHA" '[.[] | select(.commit_id != $sha)] | length' <<<"$this_run")
+          this_run_file=$(mktemp "$RUNNER_TEMP/claude-review-comments.XXXXXX")
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/pulls/$PR/comments" | \
+            jq --arg start "$RUN_START" '[.[][] | select(.user.login == "claude[bot]" and .created_at >= $start)]' \
+            > "$this_run_file"
 
-          for n in "$actual_total" "$actual_correctness" "$wrong_commit" "$post_errors" "$CORRECTNESS_DECLARED" "$TOTAL_DECLARED"; do
-            if ! [[ "$n" =~ ^[0-9]+$ ]]; then
-              echo "::error::Could not compute an integer finding count (got '$n')."
-              exit 1
-            fi
-          done
-          echo "declared: correctness=$CORRECTNESS_DECLARED total=$TOTAL_DECLARED | actual posted this run: total=$actual_total correctness=$actual_correctness | wrong_commit=$wrong_commit | post_errors=$post_errors"
+          verdict_file=$(mktemp "$RUNNER_TEMP/claude-review-verdict.XXXXXX.jq")
+          cat > "$verdict_file" << 'JQ_EOF'
+          def categories: ["correctness","reuse","simplification","efficiency","altitude","conventions"];
 
-          failures=()
-          [ "$CORRECTNESS_DECLARED" -gt 0 ] && failures+=("Claude's summary declared $CORRECTNESS_DECLARED correctness finding(s).")
-          [ "$actual_correctness" -gt 0 ] && failures+=("$actual_correctness posted inline comment(s) from this run are tagged [correctness].")
-          [ "$TOTAL_DECLARED" -gt "$actual_total" ] && failures+=("Claude's summary declared $TOTAL_DECLARED total finding(s) but only $actual_total inline comment(s) from this run were confirmed posted.")
-          [ "$post_errors" -gt 0 ] && failures+=("$post_errors inline-comment post attempt(s) failed during the review - a finding may be missing.")
-          [ "$wrong_commit" -gt 0 ] && failures+=("$wrong_commit posted comment(s) target a commit other than the captured head ($HEAD_SHA).")
+          # $comments and $exec arrive via --slurpfile, which always wraps a
+          # file's top-level JSON value in a one-element array - unwrap
+          # before use. --slurpfile (a file) rather than --argjson (a shell
+          # command-line argument) avoids an ARG_MAX failure on a large
+          # execution_file or a PR with many posted comments.
+          ($comments_file[0]) as $comments
+          | ($exec_file[0]) as $exec
 
-          if [ "${#failures[@]}" -gt 0 ]; then
-            printf '::error::%s\n' "${failures[*]} Fix the findings and comment /claude-review to request a re-review."
+          | ($summary | [scan("<!-- findings:[^>]*-->")]) as $all_markers
+          | ($summary | rtrimstr("\n") | split("\n") | map(select(length > 0))) as $lines
+          | ($lines[-1] // "") as $last_line
+          | ($last_line | test("^<!-- findings: correctness=[0-9]{1,4} total=[0-9]{1,4} -->$")) as $marker_ok
+          | (if (($all_markers | length) == 1) and $marker_ok then
+               ($last_line | capture("correctness=(?<c>[0-9]{1,4}) total=(?<t>[0-9]{1,4})"))
+             else null end) as $cap
+          | (if $cap != null then ($cap.c | tonumber) else null end) as $correctness_declared
+          | (if $cap != null then ($cap.t | tonumber) else null end) as $total_declared
+
+          | ($comments | map(
+              (.body // "") as $b
+              | ($b | capture("^\\s*[*_]{0,3}\\[(?<tag>[A-Za-z]+)\\]"; "i")) as $tagcap
+              | {
+                  commit_id: .commit_id,
+                  tag: (if $tagcap != null then ($tagcap.tag | ascii_downcase) else null end)
+                }
+            )) as $tagged
+          | ($tagged | map(select(.tag == null or (.tag as $t | categories | index($t) | not)))) as $bad_tags
+          | ($tagged | map(select(.tag == "correctness")) | length) as $correctness_posted
+          | ($tagged | length) as $total_posted
+          | ($comments | map(select(.commit_id != $head)) | length) as $wrong_commit
+
+          | ( [ $exec[] | select(.type=="assistant") | .message.content[]? |
+                select(.type=="tool_use" and .name=="mcp__github_inline_comment__create_inline_comment") | .id ] ) as $ids
+          | ( [ $exec[] | select(.type=="user") | .message.content[]? |
+                select(.type=="tool_result" and (.tool_use_id as $t | $ids | index($t) != null) and (.is_error // false)) ]
+              | length ) as $post_errors
+
+          | [
+              (if ($all_markers | length) != 1 then
+                 "summary must contain exactly one findings marker (found \($all_markers|length))"
+               else empty end),
+              (if ($all_markers | length) == 1 and ($marker_ok | not) then
+                 "the findings marker must be the final non-empty line, matching '<!-- findings: correctness=N total=M -->' exactly"
+               else empty end),
+              (if $cap != null and $correctness_declared > $total_declared then
+                 "declared correctness (\($correctness_declared)) exceeds declared total (\($total_declared))"
+               else empty end),
+              (if ($bad_tags|length) > 0 then
+                 "\($bad_tags|length) posted comment(s) have an unrecognized or malformed category tag"
+               else empty end),
+              (if $cap != null and $correctness_declared != $correctness_posted then
+                 "declared correctness (\($correctness_declared)) does not match posted correctness comments (\($correctness_posted))"
+               else empty end),
+              (if $cap != null and $total_declared != $total_posted then
+                 "declared total (\($total_declared)) does not match posted comments (\($total_posted))"
+               else empty end),
+              (if $correctness_posted > 0 then
+                 "\($correctness_posted) posted inline comment(s) are tagged [correctness]"
+               else empty end),
+              (if $cap != null and $correctness_declared > 0 then
+                 "summary declared \($correctness_declared) correctness finding(s)"
+               else empty end),
+              (if $post_errors > 0 then
+                 "\($post_errors) inline-comment post attempt(s) failed (isError) during the review"
+               else empty end),
+              (if $wrong_commit > 0 then
+                 "\($wrong_commit) posted comment(s) target a commit other than the captured head (\($head))"
+               else empty end)
+            ] as $reasons
+          | {pass: ($reasons|length==0), reasons: $reasons}
+          JQ_EOF
+
+          verdict=$(jq -n --arg summary "$summary" \
+            --slurpfile comments_file "$this_run_file" \
+            --slurpfile exec_file "$EXECUTION_FILE" \
+            --arg head "$HEAD_SHA" \
+            -f "$verdict_file")
+
+          echo "verdict: $verdict"
+          if [ "$(jq -r '.pass' <<<"$verdict")" != "true" ]; then
+            jq -r '.reasons[] | "::error::" + .' <<<"$verdict"
+            echo "::error::Fix the findings and comment /claude-review to request a re-review."
             exit 1
           fi
