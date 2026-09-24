@@ -340,7 +340,7 @@ jobs:
 
           | ($comments | map(
               (.body // "") as $b
-              | ($b | capture("^\\s*[*_]{0,3}\\[(?<tag>[A-Za-z]+)\\]"; "i")) as $tagcap
+              | ($b | (capture("^\\s*[*_]{0,3}\\[(?<tag>[A-Za-z]+)\\]"; "i") // null)) as $tagcap
               | {
                   commit_id: .commit_id,
                   tag: (if $tagcap != null then ($tagcap.tag | ascii_downcase) else null end)
@@ -348,7 +348,7 @@ jobs:
             )) as $tagged
           | ($tagged | map(select(.tag == null or (.tag as $t | categories | index($t) | not)))) as $bad_tags
           | ($tagged | map(select(.tag == "correctness")) | length) as $correctness_posted
-          | ($tagged | length) as $total_posted
+          | ($comments | length) as $total_posted
           | ($comments | map(select(.commit_id != $head)) | length) as $wrong_commit
 
           | ( [ $exec[] | select(.type=="assistant") | .message.content[]? |
