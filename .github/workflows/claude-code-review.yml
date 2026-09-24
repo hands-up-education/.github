@@ -183,6 +183,22 @@ jobs:
           git diff --name-only "$MERGE_BASE" "$HEAD" > "$dir/changed-files.txt"
           echo "dir=$dir" >> "$GITHUB_OUTPUT"
 
+      # Belt and braces on top of the claude_args flags below (which are the
+      # actual enforcement): the SDK looks for project-level Claude config
+      # in the current directory regardless of who's asking, so delete a
+      # PR-supplied .claude/ (settings.json can define hooks - shell
+      # commands that run on session start with this job's token in the
+      # environment, no prompt injection needed), .mcp.json (a project MCP
+      # server definition - also just a command the SDK spawns) and
+      # CLAUDE.md/CLAUDE.local.md (loaded into context unconditionally; not
+      # code, but still PR-controlled instruction text). The diff written
+      # above already captured any changes to these paths as plain text, so
+      # the review still sees that the PR touched them - deleting them here
+      # only stops the SDK from loading them as live configuration.
+      - name: Remove PR-controlled Claude config
+        run: |
+          find . \( -iname '.claude' -o -iname '.mcp.json' -o -iname 'CLAUDE.md' -o -iname 'CLAUDE.local.md' \) -exec rm -rf {} +
+
       # Ground truth for "did this run actually post anything" below: any
       # review comment by claude[bot] created at or after this timestamp is
       # from this run, regardless of what the model's own summary claims.
@@ -215,6 +231,26 @@ jobs:
       #
       # The category list here must match verdict.jq's `categories` below -
       # a tag outside this set fails the gate as malformed.
+      #
+      # --setting-sources/--settings/--strict-mcp-config close the actual
+      # execution path the file-deletion step above only backstops: the SDK
+      # defaults to loading project and local settings from the checked-out
+      # PR (settingSources: user,project,local, confirmed in this action's
+      # own run logs), and a project .claude/settings.json can define a
+      # SessionStart hook - a shell command the SDK runs at session start,
+      # in this job's environment (CLAUDE_CODE_OAUTH_TOKEN included), no
+      # prompt injection or tool permission needed. Verified live and
+      # locally, with the Claude Code CLI installed here, against a fixture
+      # .claude/settings.json SessionStart hook and a fixture .mcp.json
+      # server, each touching a marker file: the hook and the project MCP
+      # server both fire with none of these three flags; neither fires with
+      # them; an MCP server passed through this action's own --mcp-config
+      # (which is how the inline-comment tool below is wired up) still
+      # loads correctly under --strict-mcp-config, since that flag only
+      # excludes servers from OTHER sources such as a project's .mcp.json
+      # or (separately) the action's own setup-claude-code-settings.ts,
+      # which unconditionally sets enableAllProjectMcpServers: true in the
+      # user settings this job's Claude Code CLI reads.
       - name: Run Claude Code Review
         id: claude-review
         uses: anthropics/claude-code-action@v1
@@ -235,6 +271,9 @@ jobs:
             --model claude-sonnet-5
             --allowedTools "Read,Grep,Glob,mcp__github_inline_comment__create_inline_comment"
             --disallowedTools "Read(**/.git/**)"
+            --setting-sources user
+            --settings '{"disableAllHooks": true}'
+            --strict-mcp-config
 
       # Trusted-side posting: the model's final response text becomes the
       # comment body verbatim (plus the run marker), posted with the
