@@ -201,7 +201,7 @@ jobs:
 
       # Ground truth for "did this run actually post anything" below: any
       # review comment by claude[bot] created at or after this timestamp is
-      # from this run, regardless of what the model's own summary claims.
+      # from this run, regardless of what the model says it posted.
       - name: Record review start time
         id: run-start
         run: echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
@@ -222,12 +222,12 @@ jobs:
       # comment-posting tool for the model at all; it can only post inline
       # findings (mcp__github_inline_comment__create_inline_comment - fixed
       # server-side to this PR's repo and number, no path/repo/PR
-      # parameters it could redirect) and its plain final response becomes
-      # the summary, posted and independently verified by trusted steps
-      # below. Read/Grep/Glob remain, scoped away from .git/** so a token
-      # can't be read back out (Claude Code applies Read deny rules to
-      # Grep/Glob too); granted bare (no path scope), Read also reaches
-      # $RUNNER_TEMP above despite that being outside the checkout.
+      # parameters it could redirect), and a trusted step below builds the
+      # summary from those comments. Read/Grep/Glob remain, scoped away
+      # from .git/** so a token can't be read back out (Claude Code applies
+      # Read deny rules to Grep/Glob too); granted bare (no path scope),
+      # Read also reaches $RUNNER_TEMP above despite that being outside the
+      # checkout.
       #
       # The category list here must match verdict.jq's `categories` below -
       # a tag outside this set fails the gate as malformed.
@@ -262,31 +262,31 @@ jobs:
 
             For every finding, post an inline PR review comment on the exact line with mcp__github_inline_comment__create_inline_comment. Start each comment body with exactly one of these tags in square brackets, and nothing before it: [correctness], [reuse], [simplification], [efficiency], [altitude], [conventions]. Always pass commit_id: "${{ steps.pr-sha.outputs.head }}" on every call - never omit it and never use a different value.
 
-            You have no tool to post a summary comment yourself. Instead, your FINAL message in this conversation - nothing before or after it - must be exactly the summary text, in this exact order:
-            1. The heading '## Claude code review'
-            2. The findings, grouped by category
-            3. The line 'Fix the findings and comment /claude-review to request a re-review.'
-            4. As the absolute final line of the message, and the only line anywhere in the message matching this shape: `<!-- findings: correctness=N total=M -->`, where N is the number of [correctness] findings and M is the total number of findings you posted (both 0 if none)
+            Right after the tag, state the finding in one short sentence (under 150 characters) on the same line, then give the details below it: the workflow builds the PR's summary comment from your inline comments, quoting that first line of each. You don't write a summary yourself, and a finding you don't post inline never reaches the PR.
           claude_args: |
-            --model claude-sonnet-5
+            --model sonnet
             --allowedTools "Read,Grep,Glob,mcp__github_inline_comment__create_inline_comment"
             --disallowedTools "Read(**/.git/**)"
             --setting-sources user
             --settings '{"disableAllHooks": true}'
             --strict-mcp-config
 
-      # Trusted-side posting: the model's final response text becomes the
-      # comment body verbatim (plus the run marker), posted with the
-      # workflow's own token via --body-file, never a value the model
-      # could turn into `--repo`/`--edit-last`/an arbitrary read. This is
-      # only a light sanity check before posting - the strict findings
-      # marker format is validated (and enforced) by the next step, so
-      # there's one place that parses it rather than two.
-      - name: Post review summary
-        id: post-summary
+      # The summary and the gate both come from one fetch of the inline
+      # comments this run actually posted, never from the model's final
+      # message, so the summary can't misreport the findings and however
+      # the model words its last message can't fail the job. Every gate rule
+      # lives in the one jq program below, which also composes the summary
+      # from the same parse, rather than in ad hoc bash comparisons that can
+      # each get an edge case wrong (a mistagged comment silently not
+      # counting toward any category). The summary is posted with the
+      # workflow's own token via --body-file, never a value the model could
+      # turn into `--repo`/`--edit-last`/an arbitrary read.
+      - name: Post summary and evaluate findings
         env:
           GH_TOKEN: ${{ github.token }}
           EXECUTION_FILE: ${{ steps.claude-review.outputs.execution_file }}
+          HEAD_SHA: ${{ steps.pr-sha.outputs.head }}
+          RUN_START: ${{ steps.run-start.outputs.time }}
           RUN_MARKER: "<!-- run:${{ github.run_id }} -->"
         run: |
           set -euo pipefail
@@ -298,43 +298,10 @@ jobs:
           num_turns=$(jq -r '.num_turns // -1' <<<"$result")
           denials=$(jq -r '(.permission_denials // []) | length' <<<"$result")
           if [ "$num_turns" = "0" ]; then
-            echo "::error::Claude Code completed 0 turns ($denials tool call(s) denied) - it never read the diff or posted a finding, so no summary can exist. Check --allowedTools covers every tool the review prompt uses."
+            echo "::error::Claude Code completed 0 turns ($denials tool call(s) denied) - it never read the diff or posted a finding. Check --allowedTools covers every tool the review prompt uses."
             exit 1
           fi
-          summary=$(jq -r '.result // ""' <<<"$result")
-          if [ -z "$summary" ] || [[ "$summary" != "## Claude code review"* ]]; then
-            echo "::error::Claude's final message wasn't a summary starting with '## Claude code review' - got: ${summary:0:200}"
-            exit 1
-          fi
-
-          body_file=$(mktemp "$RUNNER_TEMP/claude-review-summary.XXXXXX")
-          printf '%s\n\n%s\n' "$summary" "$RUN_MARKER" > "$body_file"
-          gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body-file "$body_file"
-
-      # Every gate rule lives in this one jq program so there's a single
-      # place that parses the summary and the posted comments, instead of
-      # several ad hoc bash comparisons that can each get an edge case
-      # wrong (unbounded numbers, a marker that isn't really the summary's
-      # last line, a mistagged comment silently not counting toward any
-      # category). The bash around it only fetches inputs and checks the
-      # single `pass` field - see the workflow's PR description for the
-      # fixtures this program was tested against (clean pass, oversized
-      # numbers, duplicate markers, a mistagged comment, and more).
-      - name: Evaluate findings
-        env:
-          GH_TOKEN: ${{ github.token }}
-          EXECUTION_FILE: ${{ steps.claude-review.outputs.execution_file }}
-          HEAD_SHA: ${{ steps.pr-sha.outputs.head }}
-          RUN_START: ${{ steps.run-start.outputs.time }}
-        run: |
-          set -euo pipefail
-          current_head=$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json headRefOid --jq .headRefOid)
-          if [ "$current_head" != "$HEAD_SHA" ]; then
-            echo "::error::PR changed during review (was $HEAD_SHA, now $current_head) - re-run /claude-review."
-            exit 1
-          fi
-
-          summary=$(jq -r '[.[] | select(.type=="result")] | last | .result // ""' "$EXECUTION_FILE")
+          jq -e '.subtype == "success" and (.is_error | not)' <<<"$result" >/dev/null || { echo "::error::Claude Code did not finish successfully"; exit 1; }
 
           # commit_id on a posted comment is whatever the model passed, not
           # something GitHub enforces - a model (honest or manipulated)
@@ -358,6 +325,7 @@ jobs:
           verdict_file=$(mktemp "$RUNNER_TEMP/claude-review-verdict.XXXXXX.jq")
           cat > "$verdict_file" << 'JQ_EOF'
           def categories: ["correctness","reuse","simplification","efficiency","altitude","conventions"];
+          def untagged: "Without a recognized tag";
 
           # $comments and $exec arrive via --slurpfile, which always wraps a
           # file's top-level JSON value in a one-element array - unwrap
@@ -367,77 +335,102 @@ jobs:
           ($comments_file[0]) as $comments
           | ($exec_file[0]) as $exec
 
-          | ($summary | [scan("<!-- findings:[^>]*-->")]) as $all_markers
-          | ($summary | rtrimstr("\n") | split("\n") | map(select(length > 0))) as $lines
-          | ($lines[-1] // "") as $last_line
-          | ($last_line | test("^<!-- findings: correctness=[0-9]{1,4} total=[0-9]{1,4} -->$")) as $marker_ok
-          | (if (($all_markers | length) == 1) and $marker_ok then
-               ($last_line | capture("correctness=(?<c>[0-9]{1,4}) total=(?<t>[0-9]{1,4})"))
-             else null end) as $cap
-          | (if $cap != null then ($cap.c | tonumber) else null end) as $correctness_declared
-          | (if $cap != null then ($cap.t | tonumber) else null end) as $total_declared
-
+          # \A rather than ^ pins the tag to the start of the body whatever
+          # line mode the regex engine runs in.
           | ($comments | map(
               (.body // "") as $b
-              | ($b | (capture("^\\s*[*_]{0,3}\\[(?<tag>[A-Za-z]+)\\]"; "i") // null)) as $tagcap
+              | ($b | (capture("\\A\\s*[*_]{0,3}\\[(?<tag>[A-Za-z]+)\\]"; "i") // null)) as $tagcap
+              | (if $tagcap != null then ($tagcap.tag | ascii_downcase) else null end) as $tag
+              | ($tag != null and (categories | index($tag)) != null) as $known
               | {
                   commit_id: .commit_id,
-                  tag: (if $tagcap != null then ($tagcap.tag | ascii_downcase) else null end)
+                  tag: $tag,
+                  known: $known,
+                  group: (if $known then "[\($tag)]" else untagged end),
+                  # The model picks the path: strip anything that could close
+                  # the code span or link text, or start a new line.
+                  where: ((.path | gsub("[`\\[\\]()<>\\r\\n]"; "")) + ((.line // .original_line) | if . then ":\(.)" else "" end)),
+                  url: .html_url,
+                  # A mistagged comment keeps its bad tag in the title, so the
+                  # summary shows why it failed the gate. GitHub also breaks
+                  # lines on a lone \r, so the quoted line ends at either.
+                  title: ((if $known then ($b | sub("\\A\\s*[*_]{0,3}\\[[A-Za-z]+\\][*_]{0,3}:?[*_]{0,3}\\s*"; "")) else $b end)
+                    | [splits("[\\r\\n]+") | select(test("\\S"))] | (.[0] // "")
+                    | sub("\\A\\s+"; "") | sub("\\s+\\z"; "")
+                    | if length < 150 then . else (.[0:149] | sub("\\s+\\S*\\z"; "") | .[0:148]) + "…" end)
                 }
             )) as $tagged
-          | ($tagged | map(select(.tag == null or (.tag as $t | categories | index($t) | not)))) as $bad_tags
+          | ($tagged | map(select(.known | not))) as $bad_tags
           | ($tagged | map(select(.tag == "correctness")) | length) as $correctness_posted
-          | ($comments | length) as $total_posted
           | ($comments | map(select(.commit_id != $head)) | length) as $wrong_commit
 
           | ( [ $exec[] | select(.type=="assistant") | .message.content[]? |
                 select(.type=="tool_use" and .name=="mcp__github_inline_comment__create_inline_comment") | .id ] ) as $ids
           | ( [ $exec[] | select(.type=="user") | .message.content[]? |
-                select(.type=="tool_result" and (.tool_use_id as $t | $ids | index($t) != null) and (.is_error // false)) ]
-              | length ) as $post_errors
+                select(.type=="tool_result" and (.tool_use_id as $t | $ids | index($t) != null)) ] ) as $post_results
+          | ($post_results | map(select(.is_error // false)) | length) as $post_errors
+          | ($post_results | map(select((.is_error // false) | not)) | length) as $posted_ok
 
+          # Reasons are posted in the summary, so they carry only counts and
+          # SHAs, never text the model wrote.
           | [
-              (if ($all_markers | length) != 1 then
-                 "summary must contain exactly one findings marker (found \($all_markers|length))"
-               else empty end),
-              (if ($all_markers | length) == 1 and ($marker_ok | not) then
-                 "the findings marker must be the final non-empty line, matching '<!-- findings: correctness=N total=M -->' exactly"
-               else empty end),
-              (if $cap != null and $correctness_declared > $total_declared then
-                 "declared correctness (\($correctness_declared)) exceeds declared total (\($total_declared))"
-               else empty end),
               (if ($bad_tags|length) > 0 then
                  "\($bad_tags|length) posted comment(s) have an unrecognized or malformed category tag"
                else empty end),
-              (if $cap != null and $correctness_declared != $correctness_posted then
-                 "declared correctness (\($correctness_declared)) does not match posted correctness comments (\($correctness_posted))"
-               else empty end),
-              (if $cap != null and $total_declared != $total_posted then
-                 "declared total (\($total_declared)) does not match posted comments (\($total_posted))"
-               else empty end),
               (if $correctness_posted > 0 then
                  "\($correctness_posted) posted inline comment(s) are tagged [correctness]"
-               else empty end),
-              (if $cap != null and $correctness_declared > 0 then
-                 "summary declared \($correctness_declared) correctness finding(s)"
                else empty end),
               (if $post_errors > 0 then
                  "\($post_errors) inline-comment post attempt(s) failed (isError) during the review"
                else empty end),
               (if $wrong_commit > 0 then
                  "\($wrong_commit) posted comment(s) target a commit other than the captured head (\($head))"
+               else empty end),
+              # With classify_inline_comments off, a successful tool result is
+              # a created comment, so finding fewer means the fetch missed some
+              # (another bot login, list-after-write lag). Finding more is fine:
+              # another claude[bot] comment can land in the same window.
+              (if $posted_ok > ($comments|length) then
+                 "\($posted_ok) inline comment(s) were posted but only \($comments|length) were found for this run"
+               else empty end),
+              (if $current_head != $head then
+                 "PR changed during review (was \($head), now \($current_head)) - re-run /claude-review"
                else empty end)
             ] as $reasons
-          | {pass: ($reasons|length==0), reasons: $reasons}
+
+          | (if ($tagged | length) > 0 then
+               ([ ((categories[] | "[\(.)]"), untagged) as $group
+                  | [ $tagged[] | select(.group == $group) ] as $items
+                  | select($items | length > 0)
+                  | "**\($group)**\n"
+                    + ($items | map("- [`\(.where)`](\(.url))" + (if .title == "" then "" else " — \(.title)" end)) | join("\n"))
+                ] | join("\n\n"))
+               + "\n\nFix the findings and comment /claude-review to request a re-review."
+             elif ($reasons | length) > 0 then "No inline findings were posted."
+             else "No findings."
+             end) as $findings
+
+          | {
+              pass: ($reasons|length==0),
+              reasons: $reasons,
+              summary: ("## Claude code review\n\n\($findings)"
+                + (if ($reasons | length) > 0 then "\n\n**Check failed**\n" + ($reasons | map("- \(.)") | join("\n")) else "" end))
+            }
           JQ_EOF
 
-          verdict=$(jq -n --arg summary "$summary" \
-            --slurpfile comments_file "$this_run_file" \
+          current_head=$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json headRefOid --jq .headRefOid)
+          verdict=$(jq -n --slurpfile comments_file "$this_run_file" \
             --slurpfile exec_file "$EXECUTION_FILE" \
             --arg head "$HEAD_SHA" \
+            --arg current_head "$current_head" \
             -f "$verdict_file")
 
-          echo "verdict: $verdict"
+          summary=$(jq -r '.summary' <<<"$verdict")
+          body_file=$(mktemp "$RUNNER_TEMP/claude-review-summary.XXXXXX")
+          printf '%s\n\n%s\n' "$summary" "$RUN_MARKER" > "$body_file"
+          gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body-file "$body_file"
+
+          echo "verdict: $(jq -c 'del(.summary)' <<<"$verdict")"
           if [ "$(jq -r '.pass' <<<"$verdict")" != "true" ]; then
             jq -r '.reasons[] | "::error::" + .' <<<"$verdict"
             echo "::error::Fix the findings and comment /claude-review to request a re-review."
