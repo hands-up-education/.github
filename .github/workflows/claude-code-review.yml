@@ -285,6 +285,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           EXECUTION_FILE: ${{ steps.claude-review.outputs.execution_file }}
+          CALLER_REPOSITORY: ${{ github.event.repository.full_name }}
+          CALLER_REPOSITORY_VISIBILITY: ${{ github.event.repository.visibility }}
           HEAD_SHA: ${{ steps.pr-sha.outputs.head }}
           RUN_START: ${{ steps.run-start.outputs.time }}
           RUN_MARKER: "<!-- run:${{ github.run_id }} -->"
@@ -293,6 +295,37 @@ jobs:
           if [ -z "$EXECUTION_FILE" ] || [ ! -f "$EXECUTION_FILE" ]; then
             echo "::error::No execution output from Claude Code Review - nothing to post."
             exit 1
+          fi
+          # Preserve only failed inline tool pairs in the existing masked job log.
+          # This is bounded diagnostic text, not a universally secret-free transcript.
+          if [ "${CALLER_REPOSITORY_VISIBILITY:-}" = "private" ] && [ "${CALLER_REPOSITORY:-}" = "$GITHUB_REPOSITORY" ]; then
+            jq -r '
+              def safe($limit):
+                if type == "string" then
+                  gsub("(?:gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{11,221}|sk-ant-[A-Za-z0-9_-]{20,}|xox[abpsr]-[A-Za-z0-9-]{10,}|(?:AKIA|ASIA)[A-Z0-9]{16}|eyJ[A-Za-z0-9_-]{10,2000}\\.eyJ[A-Za-z0-9_-]{10,4000}\\.[A-Za-z0-9_-]{10,2000})"; "[REDACTED]")
+                  | if length > $limit then .[:$limit] + "[TRUNCATED]" else . end
+                elif type == "number" or type == "boolean" then . else null end;
+              [.[] | select(.type == "assistant") | .message.content[]?
+                | select(.type == "tool_use" and .name == "mcp__github_inline_comment__create_inline_comment")] as $calls
+              | [.[] | select(.type == "user") | .message.content[]?
+                | select(.type == "tool_result" and (.is_error // false))
+                | . as $result | $calls[] | select(.id == $result.tool_use_id)
+                | {call: ., result: $result}] as $failed
+              | $failed[:16][]
+              | {diagnostic: "failed_inline_post", run_id: env.GITHUB_RUN_ID,
+                 run_attempt: env.GITHUB_RUN_ATTEMPT, head: env.HEAD_SHA,
+                 failed_results_total: ($failed | length),
+                 diagnostic_results_omitted: ([($failed | length) - 16, 0] | max),
+                 tool_use_id: (.call.id | safe(256)),
+                 input: (.call.input | if type == "object" then {path: (.path | safe(1024)), line: (.line | safe(256)),
+                   startLine: (.startLine | safe(256)), side: (.side | safe(256)),
+                   commit_id: (.commit_id | safe(256)), body: (.body | safe(12000))} else null end),
+                 is_error: true,
+                 result_text: (.result.content | if type == "array" then
+                   map(select(type == "object") | select(.type == "text") | .text | select(type == "string")) | join("\n")
+                   else . end | safe(4000))}
+              | @json | gsub("#"; "\\u0023")
+            ' "$EXECUTION_FILE"
           fi
           result=$(jq '[.[] | select(.type == "result")] | last' "$EXECUTION_FILE")
           num_turns=$(jq -r '.num_turns // -1' <<<"$result")
